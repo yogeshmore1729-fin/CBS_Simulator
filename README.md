@@ -62,7 +62,6 @@ npm run dev
 | ▶ START    | Runs the `startScript` path (set in File Path Configuration on setenv.sh tab) |
 | ■ STOP     | Runs the `stopScript` path, then polls `ps -ef \| grep simulator-service-1.0.1.jar` every 3s until process exits |
 | ↺ RESTART  | Stop + Start in sequence |
-| ? CHECK    | Runs `ps -ef \| grep simulator-service-1.0.1.jar \| grep -v grep` and sets RUNNING or STOPPED |
 
 All output (stdout, stderr, exit code) is shown in the **Operation Log** panel.
 
