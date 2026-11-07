@@ -61,14 +61,16 @@ export default function SettingsView({ onSaved, theme, setTheme, notify }) {
         </form>
       </Card>
 
-      <Card title="Simulator setup" desc="Set these in the simulator's bin/setenv.sh, then restart it once.">
-        <pre className="logbox mono small" style={{ minHeight: 0 }}>{`export CBS_ADMIN_HOST=0.0.0.0                 # listen on all interfaces (default 127.0.0.1)
-export CBS_ADMIN_PORT=7099
-export CBS_ADMIN_TOKEN=<long random secret>   # the token entered above
-export CBS_ADMIN_CORS_ORIGINS=${location.origin}
-# https (needed when this page is https and the simulator is not localhost):
-export CBS_ADMIN_KEYSTORE=cfg/cbs-admin.p12
-export CBS_ADMIN_KEYSTORE_PASSWORD=<password>`}</pre>
+      <Card title="Simulator setup" desc="One-time, on the simulator machine (details in the README).">
+        <pre className="logbox mono small" style={{ minHeight: 0 }}>{`cd <install-dir>                 # …/build/install/simulator-service
+bin/console-setup.sh             # creates token + https certificate in ~/.cbs-simulator
+bin/restart.sh                   # or build.sh - the simulator reads them at start
+
+# printed by console-setup.sh:
+#   Simulator API URL : https://<simulator-ip>:7099
+#   API token         : <token>
+# then open https://<simulator-ip>:7099/api/health once and accept the certificate.
+# This page's origin must be in CBS_ADMIN_CORS_ORIGINS (bin/setenv.sh): ${location.origin}`}</pre>
       </Card>
 
       <Card title="Appearance">

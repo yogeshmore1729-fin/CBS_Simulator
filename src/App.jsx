@@ -82,7 +82,9 @@ function ReviewModal({ draft, config, live, onClose, onApplied, notify }) {
         <>
           <Button onClick={onClose}>Keep editing</Button>
           <Button onClick={() => go(false)} title="Write the files only; the running simulator keeps its current config until it restarts">Save to disk only</Button>
-          <Button variant="primary" onClick={() => go(true)} disabled={!live} title={live ? "" : "The simulator is not reachable"}>Apply live</Button>
+          <Button variant="primary" onClick={() => go(true)} disabled={!live} title={live ? "" : "The simulator is not reachable"}>
+            {live && live.simulator !== "running" ? "Save (applies on Start)" : "Apply live"}
+          </Button>
         </>
       }
     >
@@ -199,45 +201,54 @@ export default function App() {
     return false;
   };
 
-  const runOp = async (action) => {
-    const log = [];
-    const add = (text, type = "info") => { log.push({ at: Date.now(), text, type }); setOpResult({ name: action, log: [...log] }); };
-    if (action === "start") {
-      try {
-        await api.sim("start");
-      } catch (e) {
-        if (e.kind === "conflict") { add(e.message, "info"); notify("The simulator is already running", "info"); }
-        else if (e.kind === "unreachable") {
-          add(e.message, "error");
-          add("The page can only reach a running simulator. Start it on its machine with bin/start (or build.sh); this page reconnects automatically.", "warn");
-          notify("Simulator is not reachable - start it on its machine", "warn");
-        } else { add(e.message, "error"); notify(e.message, "bad"); }
-      }
-      refreshStatus();
-      return;
+  /** Polls /api/status until `done(status)` is true or `ms` elapsed; streams the server's progress log. */
+  const watch = async (done, ms, onLog) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const s = await refreshStatus();
+      if (s && onLog) onLog(s.opLog || []);
+      if (s && done(s)) return s;
     }
-    const before = live?.pid;
+    return null;
+  };
+
+  const runOp = async (action) => {
+    let log = [];
+    const show = (entries) => setOpResult({ name: action, log: entries });
+    const add = (text, type = "info") => { log = [...log, { at: Date.now(), text, type }]; show(log); };
     setPending(action);
     try {
-      const r = await api.sim(action);
-      (r.log || []).forEach((l) => add(l.text, l.type));
-      add("Waiting for the simulator to shut down…");
-      const down = await waitFor((reachable) => !reachable, 90000);
-      add(down ? "Simulator is down" : "Simulator still answers after 90 s - check its log", down ? "ok" : "warn");
-      if (action === "stop") {
-        notify(down ? "Simulator stopped" : "Stop did not complete", down ? "ok" : "warn");
-      } else if (down) {
-        add("Waiting for it to come back…");
-        const up = await waitFor((reachable) => reachable, 180000);
+      if (action === "full-restart") {
+        const before = live?.pid;
+        const r = await api.sim("full-restart");
+        log = r.log || []; show(log);
+        add("Waiting for the process to go down…");
+        const down = await waitFor((reachable) => !reachable, 90000);
+        add(down ? "Process is down" : "Still answering after 90 s", down ? "ok" : "warn");
+        const up = down && (await waitFor((reachable) => reachable, 180000));
         const s = up ? await refreshStatus() : null;
         add(up ? `Simulator is back${s ? ` (PID ${s.pid}${before ? `, was ${before}` : ""})` : ""}` : "Not back after 3 minutes - check log/console-restart.log on the simulator machine", up ? "ok" : "error");
-        notify(up ? "Simulator restarted" : "Restart did not complete", up ? "ok" : "bad");
+        notify(up ? "Full restart completed" : "Full restart did not complete", up ? "ok" : "bad");
         if (up) { setDraft(emptyDraft()); loadConfig(); }
+      } else {
+        await api.sim(action);
+        const target = action === "stop" ? "stopped" : "running";
+        const s = await watch((x) => !x.busy && x.simulator === target, 150000, (entries) => show(entries));
+        if (s) show(s.opLog || []);
+        const ok = !!s && (s.opLog || []).some((l) => l.type === "ok" && / completed /.test(l.text));
+        notify(ok ? `Simulator ${target}` : `${action} did not complete - see the output`, ok ? "ok" : "warn");
       }
     } catch (e) {
-      (e.data?.log || []).forEach((l) => add(l.text, l.type));
-      add(e.message, "error");
-      notify(e.message, "bad");
+      if (e.kind === "unreachable") {
+        add(e.message, "error");
+        add("The simulator process (and its console API) is down - start it on its machine with bin/start (or build.sh); this page reconnects automatically.", "warn");
+        notify("Simulator is not reachable - start it on its machine", "warn");
+      } else {
+        (e.data?.log || []).forEach((l) => add(l.text, l.type));
+        add(e.message, e.kind === "conflict" ? "info" : "error");
+        notify(e.message, e.kind === "conflict" ? "info" : "bad");
+      }
     }
     setPending(null);
     refreshStatus();
@@ -251,8 +262,8 @@ export default function App() {
   const total = counts.setenv + counts.cdci + counts.financial;
 
   const busy = pending || live?.busy;
-  const headerTone = busy ? "warn" : live ? "ok" : "bad";
-  const headerText = busy ? `${busy}…` : live ? `Running · PID ${live.pid}`
+  const headerTone = busy ? "warn" : live ? (live.simulator === "running" ? "ok" : "muted") : "bad";
+  const headerText = busy ? `${busy}…` : live ? (live.simulator === "running" ? `Running · PID ${live.pid}` : `Simulator ${live.simulator} · console online`)
     : connErr?.kind === "unconfigured" ? "Not connected" : connErr?.kind === "unauthorized" ? "Token rejected" : connErr?.kind === "unreachable" ? "Not reachable" : "Error";
 
   const needsConfig = ["env", "cdci", "financial"].includes(view);

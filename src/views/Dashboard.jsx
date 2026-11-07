@@ -9,16 +9,18 @@ const FILE_NAMES = { setenv: "setenv.sh", cdci: "cdci_rc.cfg", financial: "finan
 export default function Dashboard({ live, connErr, pending, runOp, opResult, goto }) {
   const [confirm, setConfirm] = useState(null);
   const [activity, setActivity] = useState([]);
-  const running = !!live;
+  const online = !!live;                       // console API answers
+  const sim = live?.simulator;                 // running | stopping | stopped | starting
+  const running = sim === "running";
 
   useEffect(() => {
-    if (!running) return undefined;
+    if (!online) return undefined;
     let alive = true;
     const load = () => api.activity().then((a) => alive && setActivity(a)).catch(() => {});
     const first = setTimeout(load, 0);
     const t = setInterval(load, 5000);
     return () => { alive = false; clearTimeout(first); clearInterval(t); };
-  }, [running]);
+  }, [online]);
 
   if (connErr?.kind === "unconfigured") {
     return (
@@ -29,8 +31,8 @@ export default function Dashboard({ live, connErr, pending, runOp, opResult, got
   }
 
   const busy = pending || (live?.busy ? live.busy : null);
-  const state = busy ? `${String(busy).toUpperCase()}…` : running ? "RUNNING" : connErr?.kind === "unreachable" ? "UNREACHABLE" : connErr ? "ERROR" : "…";
-  const tone = busy ? "warn" : running ? "ok" : "bad";
+  const state = busy ? `${String(busy).toUpperCase()}…` : online ? (sim || "running").toUpperCase() : connErr?.kind === "unreachable" ? "UNREACHABLE" : connErr ? "ERROR" : "…";
+  const tone = busy ? "warn" : running ? "ok" : online ? "muted" : "bad";
   const tms = (live?.tms || []).slice().sort((a, b) => (CBS_TMS.indexOf(b.name) >= 0) - (CBS_TMS.indexOf(a.name) >= 0) || a.name.localeCompare(b.name));
   const reloaded = tms.filter((t) => t.version > 1);
   const inFlightOld = tms.reduce((n, t) => n + Object.entries(t.inFlight || {}).filter(([v]) => Number(v) !== t.version).reduce((s, [, c]) => s + c, 0), 0);
@@ -54,23 +56,28 @@ export default function Dashboard({ live, connErr, pending, runOp, opResult, got
             <div><dt>Java</dt><dd className="mono">{live?.java ?? "—"}</dd></div>
           </dl>
           {live && <p className="muted mono small">{live.home}</p>}
+          {online && sim === "stopped" && !busy && (
+            <p className="note note-info">The simulator is stopped: it accepts no CBS traffic. The console stays connected - press <b>Start</b> to bring it back.</p>
+          )}
           {connErr && connErr.kind !== "unconfigured" && (
             <p className={`note ${connErr.kind === "unreachable" ? "note-warn" : "note-bad"}`}>
               {connErr.message}
-              {connErr.kind === "unreachable" && <> If it is stopped, start it on the simulator machine with <code>bin/start</code> (or <code>build.sh</code>); this page reconnects automatically.</>}
+              {connErr.kind === "unreachable" && <> The simulator process (and its console API) is down - start it on its machine with <code>bin/start</code> (or <code>build.sh</code>); this page reconnects automatically.</>}
               {connErr.kind === "unauthorized" && <> <button className="link" onClick={() => goto("settings")}>Check the token in Settings</button>.</>}
             </p>
           )}
           <div className="btn-row">
-            <Button variant="primary" icon="▶" disabled={!!busy} onClick={() => runOp("start")}>Start</Button>
-            <Button icon="■" disabled={!!busy || !running} onClick={() => ask("stop", "Stop the simulator?", "Q2 shuts down gracefully; transactions in flight are interrupted. The simulator then has to be started again on its machine - this page cannot start it.")}>Stop</Button>
-            <Button icon="↻" disabled={!!busy || !running} onClick={() => ask("restart", "Restart the simulator?", "Graceful stop, then start. Transactions in flight are interrupted. To change settings without interrupting anything, use Apply live instead.")}>Restart</Button>
+            <Button variant="primary" icon="▶" disabled={!!busy || running || (online && sim !== "stopped")} onClick={() => runOp("start")}>Start</Button>
+            <Button icon="■" disabled={!!busy || !running} onClick={() => ask("stop", "Stop the simulator?", "The CBS port closes, transactions in flight are allowed to finish (up to 30 s), then the transaction managers are undeployed. The console stays connected so you can Start it again from here.")}>Stop</Button>
+            <Button icon="↻" disabled={!!busy || !running} onClick={() => ask("restart", "Restart the simulator?", "Stop (with drain) and Start inside the running process - the console stays connected. To change settings without interrupting anything, use Apply live instead.")}>Restart</Button>
+            <Button variant="danger-ghost" icon="⟳" disabled={!!busy || !online} title="Restart the Java process - needed after a rebuild or a startup-setting change"
+              onClick={() => ask("full-restart", "Full restart (JVM)?", "Restarts the whole simulator process with bin/console-restart.sh. Needed only after rebuilding the simulator or changing startup settings (JVM, Redis, CBS_ADMIN_*, …). The console disconnects for a few seconds and reconnects.")}>Full restart</Button>
           </div>
         </Card>
 
         <Card title="Live configuration" desc="Settings are applied to the running simulator without a restart. Transactions already in progress finish on the configuration they started with.">
           {!running ? (
-            <p className="muted">Connect to a running simulator to see its live configuration.</p>
+            <p className="muted">{online ? "The simulator is not running." : "Connect to a running simulator to see its live configuration."}</p>
           ) : (
             <>
               <div className="stat-row">
@@ -114,8 +121,8 @@ export default function Dashboard({ live, connErr, pending, runOp, opResult, got
                   <Dot tone={a.kind === "apply" ? "info" : a.ok ? "ok" : "bad"} />
                   <span className="activity-text">
                     {a.kind === "apply"
-                      ? <>Applied changes to <b>{a.files.map((f) => FILE_NAMES[f] || f).join(", ")}</b>{a.reload ? <> · hot-reloaded {a.reload.filter((r) => r.ok).map((r) => r.tm).join(", ") || "nothing"}</> : " · saved only"}</>
-                      : <><b>{a.name}</b> {a.ok ? "requested" : "failed"}</>}
+                      ? <>Applied changes to <b>{a.files.map((f) => FILE_NAMES[f] || f).join(", ")}</b>{a.reload ? (a.reload.some((r) => r.ok) ? <> · hot-reloaded {a.reload.filter((r) => r.ok).map((r) => r.tm).join(", ")}</> : " · saved (nothing running to reload)") : " · saved only"}</>
+                      : <><b>{a.name}</b> {a.ok ? (a.name === "full restart" ? "requested" : "completed") : "failed"}</>}
                   </span>
                   <span className="muted small">{new Date(a.at).toLocaleTimeString("en-GB", { hour12: false })}</span>
                 </li>
@@ -137,7 +144,7 @@ export default function Dashboard({ live, connErr, pending, runOp, opResult, got
         <Confirm
           title={confirm.title}
           message={confirm.message}
-          confirmLabel={confirm.action[0].toUpperCase() + confirm.action.slice(1)}
+          confirmLabel={{ stop: "Stop", restart: "Restart", "full-restart": "Full restart" }[confirm.action]}
           onCancel={() => setConfirm(null)}
           onConfirm={() => { const a = confirm.action; setConfirm(null); runOp(a); }}
         />
