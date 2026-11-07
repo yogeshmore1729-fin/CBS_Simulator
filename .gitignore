@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.idea/
+.vscode/
+# local console settings (simulator install dir)
+cbs-console.settings.json

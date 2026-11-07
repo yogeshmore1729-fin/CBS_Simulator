@@ -1,12 +1,15 @@
 {
-  "name": "simulator",
+  "name": "cbs-simulator-console",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "server": "node server/index.js",
     "build": "vite build",
+    "start": "vite build && node server/index.js",
     "lint": "eslint .",
+    "test": "node --test server/",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -23,5 +26,9 @@
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
     "vite": "^7.3.1"
+  },
+  "description": "Web console to control the CBS simulator and change its configuration at runtime",
+  "engines": {
+    "node": ">=20"
   }
 }
