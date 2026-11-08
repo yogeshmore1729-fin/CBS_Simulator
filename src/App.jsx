@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "./api.js";
+import { api, connection } from "./api.js";
 import { changeList, emptyDraft, isDirty, setValue, toPayload } from "./draft.js";
 import { KNOWN_ENV, txnName } from "./meta.js";
 import { Badge, Button, Dot, Modal, OpLog, Spinner } from "./ui.jsx";
@@ -13,7 +13,7 @@ import SettingsView from "./views/SettingsView.jsx";
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: "◉" },
   { id: "env", label: "Responses & behaviour", icon: "⚙", file: "setenv" },
-  { id: "cdci", label: "RC distribution", icon: "▦", file: "cdci" },
+  { id: "cdci", label: "RC Mappings", icon: "▦", file: "cdci" },
   { id: "financial", label: "Account mappings", icon: "☰", file: "financial" },
   { id: "logs", label: "Logs", icon: "≡" },
   { id: "settings", label: "Settings", icon: "⚒" },
@@ -41,10 +41,8 @@ function describe(c) {
   return c.key;
 }
 
-function ReviewModal({ draft, config, status, onClose, onApplied, notify }) {
+function ReviewModal({ draft, config, live, onClose, onApplied, notify }) {
   const changes = changeList(draft, config);
-  const running = !!status?.process?.running;
-  const live = status?.live;
   const hotKeys = new Set(Object.keys(live?.env || {}));
   const restartOnly = changes.filter((c) => c.file === "setenv" && live && !hotKeys.has(c.key));
   const [phase, setPhase] = useState("review"); // review | applying | done
@@ -55,7 +53,7 @@ function ReviewModal({ draft, config, status, onClose, onApplied, notify }) {
     try {
       const r = await api.apply(toPayload(draft, config, liveMode));
       setResult({ ok: r.ok, log: r.log });
-      notify(r.ok ? (liveMode && running && live ? "Changes applied live" : "Changes saved") : "Saved, but the live reload did not complete - see details", r.ok ? "ok" : "warn");
+      notify(r.ok ? (liveMode ? "Changes applied live" : "Changes saved") : "Saved, but the live reload did not complete - see details", r.ok ? "ok" : "warn");
       onApplied(true);
     } catch (e) {
       // nothing was written (validation error or the file changed on disk) : keep the edits
@@ -84,19 +82,16 @@ function ReviewModal({ draft, config, status, onClose, onApplied, notify }) {
         <>
           <Button onClick={onClose}>Keep editing</Button>
           <Button onClick={() => go(false)} title="Write the files only; the running simulator keeps its current config until it restarts">Save to disk only</Button>
-          <Button variant="primary" onClick={() => go(true)}>
-            {running && live ? "Apply live" : running ? "Save (restart needed)" : "Save (applies on start)"}
+          <Button variant="primary" onClick={() => go(true)} disabled={!live} title={live ? "" : "The simulator is not reachable"}>
+            {live && live.simulator !== "running" ? "Save (applies on Start)" : "Apply live"}
           </Button>
         </>
       }
     >
-      {running && live && (
-        <p className="note note-info">
-          <b>Apply live</b> saves the files and hot-reloads the affected transaction managers in the running simulator.
-          Transactions already in progress finish on their current configuration; new ones use the new one. Nothing is restarted.
-        </p>
-      )}
-      {running && !live && <p className="note note-warn">The running simulator has no live-config API, so changes are saved and take effect after a restart.</p>}
+      <p className="note note-info">
+        <b>Apply live</b> saves the files and hot-reloads the affected transaction managers in the running simulator.
+        Transactions already in progress finish on their current configuration; new ones use the new one. Nothing is restarted.
+      </p>
       {restartOnly.length > 0 && (
         <p className="note note-warn">{restartOnly.length} startup setting{restartOnly.length > 1 ? "s" : ""} ({restartOnly.map((c) => c.key).join(", ")}) will only take effect after a restart.</p>
       )}
@@ -128,9 +123,9 @@ function ReviewModal({ draft, config, status, onClose, onApplied, notify }) {
 export default function App() {
   const [theme, setTheme] = useTheme();
   const [view, setView] = useState(() => (location.hash.slice(1) && NAV.some((n) => n.id === location.hash.slice(1)) ? location.hash.slice(1) : "dashboard"));
-  const [settings, setSettings] = useState(null);
-  const [status, setStatus] = useState(null);
-  const [serverDown, setServerDown] = useState(false);
+  const [live, setLive] = useState(null);         // GET /api/status of the connected simulator
+  const [connErr, setConnErr] = useState(null);   // ApiError while it is not usable
+  const [pending, setPending] = useState(null);   // stop / restart in progress
   const [config, setConfig] = useState(null);
   const [configError, setConfigError] = useState(null);
   const [draft, setDraft] = useState(emptyDraft);
@@ -150,10 +145,14 @@ export default function App() {
 
   const refreshStatus = useCallback(async () => {
     try {
-      setStatus(await api.status());
-      setServerDown(false);
+      const s = await api.status();
+      setLive(s);
+      setConnErr(null);
+      return s;
     } catch (e) {
-      if (e.status === 0) setServerDown(true);
+      setLive(null);
+      setConnErr(e);
+      return null;
     }
   }, []);
 
@@ -167,11 +166,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    api.settings().then(setSettings).catch(() => setServerDown(true));
     const first = setTimeout(() => { refreshStatus(); loadConfig(); }, 0);
     const t = setInterval(refreshStatus, 3000);
     return () => { clearTimeout(first); clearInterval(t); };
   }, [refreshStatus, loadConfig]);
+
+  // the simulator came (back) up while the config tabs had nothing loaded
+  const reachable = !!live;
+  useEffect(() => {
+    if (!reachable || configRef.current) return undefined;
+    const t = setTimeout(loadConfig, 0);
+    return () => clearTimeout(t);
+  }, [reachable, loadConfig]);
 
   const dirty = isDirty(draft);
   useEffect(() => {
@@ -184,16 +190,67 @@ export default function App() {
   const setEnv = useCallback((key, value) => setProp("setenv", key, value), [setProp]);
   const setLabel = useCallback((key, label) => setDraft((d) => ({ ...d, labels: { ...d.labels, [key]: label } })), []);
 
-  const runOp = async (action) => {
-    setTimeout(refreshStatus, 300);
-    try {
-      const r = await api.sim(action);
-      setOpResult({ name: action, log: r.log });
-      notify(`${action[0].toUpperCase() + action.slice(1)} ${r.ok ? "completed" : "did not complete"}`, r.ok ? "ok" : "warn");
-    } catch (e) {
-      setOpResult({ name: action, log: e.data?.log || [{ at: Date.now(), text: e.message, type: "error" }] });
-      notify(e.message, "bad");
+  /** Polls /api/health until `done(reachable, health)` is true or `ms` elapsed. */
+  const waitFor = async (done, ms) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const h = await api.health({ timeout: 3000 }).then((x) => x, () => null);
+      if (done(!!h)) return true;
     }
+    return false;
+  };
+
+  /** Polls /api/status until `done(status)` is true or `ms` elapsed; streams the server's progress log. */
+  const watch = async (done, ms, onLog) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const s = await refreshStatus();
+      if (s && onLog) onLog(s.opLog || []);
+      if (s && done(s)) return s;
+    }
+    return null;
+  };
+
+  const runOp = async (action) => {
+    let log = [];
+    const show = (entries) => setOpResult({ name: action, log: entries });
+    const add = (text, type = "info") => { log = [...log, { at: Date.now(), text, type }]; show(log); };
+    setPending(action);
+    try {
+      if (action === "full-restart") {
+        const before = live?.pid;
+        const r = await api.sim("full-restart");
+        log = r.log || []; show(log);
+        add("Waiting for the process to go down…");
+        const down = await waitFor((reachable) => !reachable, 90000);
+        add(down ? "Process is down" : "Still answering after 90 s", down ? "ok" : "warn");
+        const up = down && (await waitFor((reachable) => reachable, 180000));
+        const s = up ? await refreshStatus() : null;
+        add(up ? `Simulator is back${s ? ` (PID ${s.pid}${before ? `, was ${before}` : ""})` : ""}` : "Not back after 3 minutes - check log/console-restart.log on the simulator machine", up ? "ok" : "error");
+        notify(up ? "Full restart completed" : "Full restart did not complete", up ? "ok" : "bad");
+        if (up) { setDraft(emptyDraft()); loadConfig(); }
+      } else {
+        await api.sim(action);
+        const target = action === "stop" ? "stopped" : "running";
+        const s = await watch((x) => !x.busy && x.simulator === target, 150000, (entries) => show(entries));
+        if (s) show(s.opLog || []);
+        const ok = !!s && (s.opLog || []).some((l) => l.type === "ok" && / completed /.test(l.text));
+        notify(ok ? `Simulator ${target}` : `${action} did not complete - see the output`, ok ? "ok" : "warn");
+      }
+    } catch (e) {
+      if (e.kind === "unreachable") {
+        add(e.message, "error");
+        add("The simulator process (and its console API) is down - start it on its machine with bin/start (or build.sh); this page reconnects automatically.", "warn");
+        notify("Simulator is not reachable - start it on its machine", "warn");
+      } else {
+        (e.data?.log || []).forEach((l) => add(l.text, l.type));
+        add(e.message, e.kind === "conflict" ? "info" : "error");
+        notify(e.message, e.kind === "conflict" ? "info" : "bad");
+      }
+    }
+    setPending(null);
     refreshStatus();
   };
 
@@ -204,9 +261,10 @@ export default function App() {
   }), [draft]);
   const total = counts.setenv + counts.cdci + counts.financial;
 
-  const proc = status?.process;
-  const headerTone = serverDown ? "bad" : status?.busy ? "warn" : proc?.running ? "ok" : "bad";
-  const headerText = serverDown ? "Console server offline" : status?.busy ? `${status.busy.name}…` : proc?.running ? `Running · PID ${proc.pid}` : status?.homeError ? "Not configured" : "Stopped";
+  const busy = pending || live?.busy;
+  const headerTone = busy ? "warn" : live ? (live.simulator === "running" ? "ok" : "muted") : "bad";
+  const headerText = busy ? `${busy}…` : live ? (live.simulator === "running" ? `Running · PID ${live.pid}` : `Simulator ${live.simulator} · console online`)
+    : connErr?.kind === "unconfigured" ? "Not connected" : connErr?.kind === "unauthorized" ? "Token rejected" : connErr?.kind === "unreachable" ? "Not reachable" : "Error";
 
   const needsConfig = ["env", "cdci", "financial"].includes(view);
 
@@ -231,7 +289,7 @@ export default function App() {
         </nav>
         <div className="sidebar-foot">
           <div className="status-pill"><Dot tone={headerTone} /> {headerText}</div>
-          {status?.live && <div className="muted small">Live config API connected</div>}
+          <div className="muted small mono" title={connection.url}>{connection.url || "no simulator set"}</div>
         </div>
       </aside>
 
@@ -243,26 +301,28 @@ export default function App() {
           </div>
         </header>
 
-        {serverDown && (
-          <div className="banner banner-bad">
-            The console server is not reachable. Start it with <code>npm run server</code> (or <code>npm start</code>), then this page reconnects automatically.
+        {connErr && view !== "dashboard" && view !== "settings" && connErr.kind !== "unconfigured" && (
+          <div className={`banner ${connErr.kind === "unreachable" ? "banner-warn" : "banner-bad"}`}>
+            {connErr.message}
+            {connErr.kind === "unreachable" && <> If it is stopped, start it on its machine with <code>bin/start</code>; this page reconnects automatically.</>}
+            {(connErr.kind === "unauthorized" || connErr.kind === "forbidden" || connErr.kind === "mixed-content") && <Button size="sm" onClick={() => goto("settings")}>Settings</Button>}
           </div>
         )}
 
         <div className="content">
-          {view === "dashboard" && <Dashboard status={status} runOp={runOp} opResult={opResult} goto={goto} settings={settings} />}
+          {view === "dashboard" && <Dashboard live={live} connErr={connErr} pending={pending} runOp={runOp} opResult={opResult} goto={goto} />}
           {needsConfig && !config && (
             <div className="view">{configError
-              ? <div className="banner banner-warn">{configError} <Button size="sm" onClick={() => (status?.homeError ? goto("settings") : loadConfig())}>{status?.homeError ? "Open settings" : "Retry"}</Button></div>
+              ? <div className="banner banner-warn">{configError} <Button size="sm" onClick={() => (connErr?.kind === "unconfigured" ? goto("settings") : loadConfig())}>{connErr?.kind === "unconfigured" ? "Open settings" : "Retry"}</Button></div>
               : <div className="center"><Spinner /></div>}</div>
           )}
-          {view === "env" && config && <EnvView config={config} draft={draft} setEnv={setEnv} live={status?.live} />}
+          {view === "env" && config && <EnvView config={config} draft={draft} setEnv={setEnv} live={live} />}
           {view === "cdci" && config && <CdciView config={config} draft={draft} setProp={setProp} />}
           {view === "financial" && config && <FinancialView config={config} draft={draft} setProp={setProp} setLabel={setLabel} />}
           {view === "logs" && <LogsView />}
-          {view === "settings" && settings && (
-            <SettingsView settings={settings} theme={theme} setTheme={setTheme} notify={notify}
-              onSaved={(s) => { setSettings(s); setDraft(emptyDraft()); refreshStatus(); loadConfig(); }} />
+          {view === "settings" && (
+            <SettingsView theme={theme} setTheme={setTheme} notify={notify}
+              onSaved={() => { setDraft(emptyDraft()); setConfig(null); refreshStatus(); loadConfig(); }} />
           )}
         </div>
 
@@ -285,7 +345,7 @@ export default function App() {
         <ReviewModal
           draft={draft}
           config={config}
-          status={status}
+          live={live}
           notify={notify}
           onClose={() => setReview(false)}
           onApplied={async (written) => { if (written) setDraft(emptyDraft()); await loadConfig(); refreshStatus(); }}
