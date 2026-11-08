@@ -48,7 +48,7 @@ export const ENV_GROUPS = [
   },
   {
     id: "random", title: "Random responses",
-    desc: "On: the response comes from the CBS RC logic (account mapping / RC distribution). Off: the default response above is used.",
+    desc: "On: the response comes from the CBS RC logic (account mapping / RC Mappings). Off: the default response above is used.",
     fields: [
       ["ENABLE_RND_010044", "Debit", "bool"],
       ["ENABLE_RND_010045", "Credit", "bool"],

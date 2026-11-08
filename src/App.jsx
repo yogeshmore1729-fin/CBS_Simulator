@@ -13,7 +13,7 @@ import SettingsView from "./views/SettingsView.jsx";
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: "◉" },
   { id: "env", label: "Responses & behaviour", icon: "⚙", file: "setenv" },
-  { id: "cdci", label: "RC distribution", icon: "▦", file: "cdci" },
+  { id: "cdci", label: "RC Mappings", icon: "▦", file: "cdci" },
   { id: "financial", label: "Account mappings", icon: "☰", file: "financial" },
   { id: "logs", label: "Logs", icon: "≡" },
   { id: "settings", label: "Settings", icon: "⚒" },
